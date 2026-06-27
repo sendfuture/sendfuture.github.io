@@ -428,6 +428,7 @@ body::before {
       <div class="sub" style="margin-bottom:0;">এই Google অ্যাকাউন্টের সাথে যুক্ত আইডি:</div>
       <div class="success-id" id="existingId"></div>
       <button class="copy-btn" onclick="copyId('existingId')">📋 আইডি কপি করো</button>
+      <div class="hint" style="text-align:center;margin-top:10px;">↻ তোমার মেইল প্যানেলে নিয়ে যাওয়া হচ্ছে…</div>
     </div>
     <button class="back-link" onclick="handleSignOut()">↺ ভিন্ন Google অ্যাকাউন্ট দিয়ে সাইন-ইন করো</button>
   </div>
@@ -444,6 +445,7 @@ body::before {
       <div class="sub" style="margin-bottom:0;">তোমার নতুন ইমেইল আইডি:</div>
       <div class="success-id" id="doneId"></div>
       <button class="copy-btn" onclick="copyId('doneId')">📋 আইডি কপি করো</button>
+      <div class="hint" style="text-align:center;margin-top:10px;">↻ তোমার মেইল প্যানেলে নিয়ে যাওয়া হচ্ছে…</div>
     </div>
   </div>
 
@@ -555,6 +557,10 @@ async function routeAfterAuth(user) {
       document.getElementById('acctChipExisting').innerHTML = acctChipHTML(user);
       document.getElementById('existingId').textContent = existing.id + '@mohasin.bro.bd';
       showStep('stepExisting');
+      // ── সরাসরি mail panel-এ redirect করো ──
+      setTimeout(() => {
+        window.location.href = 'index.html?id=' + encodeURIComponent(existing.id);
+      }, 900);
     } else {
       document.getElementById('acctChip').innerHTML = acctChipHTML(user);
       document.getElementById('contactInput').value = '';
@@ -745,6 +751,10 @@ async function doRegisterSubmit() {
 
     document.getElementById('doneId').textContent = name + '@mohasin.bro.bd';
     showStep('stepDone');
+    // ── সরাসরি mail panel-এ redirect করো ──
+    setTimeout(() => {
+      window.location.href = 'index.html?id=' + encodeURIComponent(name);
+    }, 900);
   } catch (e) {
     console.error(e);
     setAlert('regAlertSlot', 'err', 'রেজিস্ট্রেশন ব্যর্থ হয়েছে: ' + (e.message || 'Unknown error'));

@@ -17,6 +17,9 @@
     getFirestore, collection, addDoc, getDocs,
     orderBy, query, serverTimestamp, doc, getDoc, setDoc, where
   } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
+  import {
+    getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged
+  } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-auth.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyDhyBH6MrDKC_j4m-gOrT3ylW-WgygGEs8",
@@ -27,14 +30,20 @@
     appId: "1:680609475208:web:724ccd0377a51cfd214d3d"
   };
 
-  const app = initializeApp(firebaseConfig);
-  const db  = getFirestore(app);
+  const app  = initializeApp(firebaseConfig);
+  const db   = getFirestore(app);
+  const auth = getAuth(app);
+  const googleProvider = new GoogleAuthProvider();
 
   // Expose globally
   window.__db = db;
+  window.__auth = auth;
   window.__fsModule = {
     collection, addDoc, getDocs, orderBy, query,
     serverTimestamp, doc, getDoc, setDoc, where
+  };
+  window.__authModule = {
+    GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged, googleProvider
   };
 
   // ── Tell app Firebase is ready, then start tenant boot ──
@@ -1501,6 +1510,8 @@ async function simpleHash(str) {
 // ══════════════════════════════
 // ▶ BOOT — Firebase ready হলে শুরু হয়
 // ══════════════════════════════
+let googleAuthListenerAttached = false;
+
 window.addEventListener('firebase-ready', async () => {
   // URL থেকে ?id= পড়ো
   const params = new URLSearchParams(window.location.search);
@@ -1511,31 +1522,83 @@ window.addEventListener('firebase-ready', async () => {
     return;
   }
 
-  // Saved session আছে কিনা চেক করো
-  const savedHash = localStorage.getItem(LS_PREFIX + tenantId);
-  if (savedHash) {
-    // Firebase থেকে tenant verify করো
-    const exists = await checkTenantExists(tenantId);
-    if (exists) {
-      tenantData = exists;
+  // Fresh visit — Firebase-এ tenant আছে কিনা চেক করো
+  const existing = await checkTenantExists(tenantId);
+  tenantData = existing;
+
+  // ── GOOGLE-FLOW TENANT (register.html থেকে আসা: ownerUid আছে) ──
+  // এদের কোনো passcode নেই — Google session match করেই unlock হবে।
+  if (existing && existing.ownerUid) {
+    bootGoogleFlow();
+    return;
+  }
+
+  // ── LEGACY PASSCODE-FLOW TENANT (admin password + 4-digit passcode) ──
+  if (existing) {
+    const savedHash = localStorage.getItem(LS_PREFIX + tenantId);
+    if (savedHash) {
       // Auto-show passcode (session resume)
       showLoginForm(true);
       return;
-    } else {
-      // localStorage stale — clear করো
-      localStorage.removeItem(LS_PREFIX + tenantId);
     }
+    showLoginForm(false);
+    return;
   }
 
-  // Fresh visit — Firebase-এ tenant আছে কিনা চেক করো
-  const existing = await checkTenantExists(tenantId);
-  if (existing) {
-    tenantData = existing;
-    showLoginForm(false);
-  } else {
-    showRegisterForm();
-  }
+  // কোনো tenant ডকুমেন্ট-ই নেই — পুরনো admin-password রেজিস্ট্রেশন ফর্ম
+  // (নতুন tenant সাধারণত register.html দিয়েই আসবে, এটা শুধু ফলব্যাক)
+  localStorage.removeItem(LS_PREFIX + tenantId); // stale session hash থাকলে clear করো
+  showRegisterForm();
 });
+
+// ══════════════════════════════
+// ▶ GOOGLE-FLOW BOOT
+//   tenant doc-এ ownerUid থাকলে এই path ব্যবহার হয়।
+//   Firebase Auth state শুনে uid মিললেই সরাসরি unlock — কোনো passcode লাগে না।
+// ══════════════════════════════
+function bootGoogleFlow() {
+  const { onAuthStateChanged } = window.__authModule;
+  if (googleAuthListenerAttached) return;
+  googleAuthListenerAttached = true;
+
+  showGoogleChecking();
+
+  onAuthStateChanged(window.__auth, (user) => {
+    if (sessionActive) return; // already unlocked, ignore further changes here
+
+    if (user && user.uid === tenantData.ownerUid) {
+      // সঠিক Google অ্যাকাউন্ট সাইন-ইন করা আছে — সরাসরি ঢুকতে দাও
+      unlockApp();
+    } else if (user) {
+      // সাইন-ইন আছে, কিন্তু ভুল অ্যাকাউন্ট
+      showGoogleMismatch(user);
+    } else {
+      // সাইন-ইন নেই
+      showGoogleSignInRequired();
+    }
+  });
+}
+
+async function handleIndexGoogleSignIn() {
+  const btn = document.getElementById('googleAuthBtn');
+  if (btn) btn.classList.add('loading');
+  try {
+    const { signInWithPopup, googleProvider } = window.__authModule;
+    await signInWithPopup(window.__auth, googleProvider);
+    // onAuthStateChanged উপরে handle করবে
+  } catch (e) {
+    const errEl = document.getElementById('authError');
+    if (errEl) errEl.textContent = 'Google সাইন-ইন ব্যর্থ: ' + (e.message || e.code || 'Unknown error');
+  } finally {
+    if (btn) btn.classList.remove('loading');
+  }
+}
+
+async function handleIndexGoogleSwitch() {
+  const { signOut } = window.__authModule;
+  await signOut(window.__auth);
+  // onAuthStateChanged → showGoogleSignInRequired() আবার দেখাবে
+}
 
 // ══════════════════════════════
 // ▶ FIREBASE HELPERS
@@ -1596,6 +1659,47 @@ function getCardHTML_Logo() {
       <span class="dot"></span>
       ${tenantId}@mohasin.bro.bd
     </div>
+  `;
+}
+
+// ══════════════════════════════
+// ▶ GOOGLE-FLOW SCREENS
+// ══════════════════════════════
+function showGoogleChecking() {
+  document.getElementById('authCard').innerHTML = `
+    ${getCardHTML_Logo()}
+    <div class="auth-title">Checking session…</div>
+    <div class="auth-sub">Google sign-in অবস্থা যাচাই করা হচ্ছে।</div>
+  `;
+}
+
+function showGoogleSignInRequired() {
+  document.getElementById('authCard').innerHTML = `
+    ${getCardHTML_Logo()}
+    <div class="auth-title">Sign in with Google</div>
+    <div class="auth-sub">এই ইমেইল আইডি (<strong>${tenantId}@mohasin.bro.bd</strong>) যে Google অ্যাকাউন্ট দিয়ে রেজিস্টার করা হয়েছিল, সেই অ্যাকাউন্ট দিয়ে সাইন-ইন করো।</div>
+
+    <button class="auth-btn" id="googleAuthBtn" onclick="handleIndexGoogleSignIn()" style="display:flex;align-items:center;justify-content:center;gap:10px;">
+      <svg viewBox="0 0 48 48" style="width:18px;height:18px;flex-shrink:0;">
+        <path fill="#FFC107" d="M43.611,20.083H42V20H24v8h11.303c-1.649,4.657-6.08,8-11.303,8c-6.627,0-12-5.373-12-12c0-6.627,5.373-12,12-12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C12.955,4,4,12.955,4,24c0,11.045,8.955,20,20,20c11.045,0,20-8.955,20-20C44,22.659,43.862,21.35,43.611,20.083z"/>
+        <path fill="#FF3D00" d="M6.306,14.691l6.571,4.819C14.655,15.108,18.961,12,24,12c3.059,0,5.842,1.154,7.961,3.039l5.657-5.657C34.046,6.053,29.268,4,24,4C16.318,4,9.656,8.337,6.306,14.691z"/>
+        <path fill="#4CAF50" d="M24,44c5.166,0,9.86-1.977,13.409-5.192l-6.19-5.238C29.211,35.091,26.715,36,24,36c-5.202,0-9.619-3.317-11.283-7.946l-6.522,5.025C9.505,39.556,16.227,44,24,44z"/>
+        <path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571c0.001-0.001,0.002-0.001,0.003-0.002l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z"/>
+      </svg>
+      Sign in with Google
+    </button>
+    <div class="auth-error" id="authError"></div>
+  `;
+}
+
+function showGoogleMismatch(user) {
+  document.getElementById('authCard').innerHTML = `
+    ${getCardHTML_Logo()}
+    <div class="auth-title">এই অ্যাকাউন্ট মিলছে না</div>
+    <div class="auth-sub">তুমি সাইন-ইন আছো <strong>${user.email || 'একটা Google অ্যাকাউন্ট'}</strong> দিয়ে, কিন্তু <strong>${tenantId}@mohasin.bro.bd</strong> অন্য একটা Google অ্যাকাউন্টের সাথে যুক্ত। সঠিক অ্যাকাউন্ট দিয়ে সাইন-ইন করো।</div>
+
+    <button class="auth-btn" onclick="handleIndexGoogleSwitch()">ভিন্ন অ্যাকাউন্ট দিয়ে সাইন-ইন করো</button>
+    <div class="auth-error" id="authError"></div>
   `;
 }
 
@@ -1792,6 +1896,22 @@ function unlockApp() {
 // ▶ LOGOUT
 // ══════════════════════════════
 function tenantLogout() {
+  // ── Google-flow tenant হলে Firebase Auth থেকেও সাইন-আউট করো ──
+  if (tenantData && tenantData.ownerUid) {
+    sessionActive = false;
+    window.__tenantId = null;
+    document.getElementById('appRoot').style.display = 'none';
+    document.getElementById('passcodeOverlay').style.display = 'none';
+    document.getElementById('authOverlay').style.display = 'flex';
+
+    const { signOut } = window.__authModule;
+    signOut(window.__auth).then(() => {
+      showGoogleSignInRequired();
+    });
+    return;
+  }
+
+  // ── Legacy passcode-flow tenant ──
   localStorage.removeItem(LS_PREFIX + tenantId);
   sessionActive = false;
   window.__tenantId = null;
@@ -1874,16 +1994,16 @@ document.addEventListener('keydown', e => {
   }
 });
 
-// ── Screen lock on tab switch ──
+// ── Screen lock on tab switch ── (শুধু legacy passcode tenant-এর জন্য; Google-flow tenant-এর কোনো passcode নেই)
 document.addEventListener('visibilitychange', () => {
-  if (document.hidden && sessionActive) {
+  if (document.hidden && sessionActive && tenantData && tenantData.passcodeHash) {
     showPasscodeLock('Screen locked. Enter passcode.');
   }
 });
 
 // ── Screen lock on window blur ──
 window.addEventListener('blur', () => {
-  if (sessionActive) {
+  if (sessionActive && tenantData && tenantData.passcodeHash) {
     showPasscodeLock('Screen locked. Enter passcode.');
   }
 });
@@ -1898,7 +2018,7 @@ window.addEventListener('blur', () => {
     if (lX !== null) {
       if ((Math.abs(x-lX)+Math.abs(y-lY)+Math.abs(z-lZ)) > 18 && Date.now()-lastShake > 1500) {
         lastShake = Date.now();
-        if (sessionActive) showPasscodeLock('🔒 Shake detected!');
+        if (sessionActive && tenantData && tenantData.passcodeHash) showPasscodeLock('🔒 Shake detected!');
       }
     }
     lX=x; lY=y; lZ=z;
